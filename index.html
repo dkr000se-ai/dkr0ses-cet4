@@ -2479,7 +2479,7 @@
             }
 
             if (!backendReady) {
-                badge.textContent = '待启动';
+                badge.textContent = '待连接';
                 statusText.textContent = cloudState.message || (
                     IS_PUBLIC_STATIC_HOST
                         ? '云端项目正在连接中。如果刚填好 Supabase 配置，刷新一次页面就会启用账号同步。'
