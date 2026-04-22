@@ -1478,7 +1478,7 @@
                         <button class="btn-secondary" id="syncNowBtn" onclick="syncCloudNow()" style="display:none">立即同步</button>
                         <button class="btn-secondary" id="logoutBtn" onclick="logoutAccount()" style="display:none">退出登录</button>
                     </div>
-                    <p id="cloudConfigNote" class="cloud-config-note">通过 `node server.js` 启动这个项目后，这里的注册、登录和同步就会自动启用。</p>
+                    <p id="cloudConfigNote" class="cloud-config-note">把 `supabase-config.js` 里的项目 URL 和 anon key 填好后，这里的注册、登录和同步就会自动启用。</p>
                 </div>
             </div>
         </section>
@@ -1493,6 +1493,8 @@
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="./supabase-config.js"></script>
     <script>
         const PLAN_CONFIG = {
             totalWords: 3000,
@@ -1509,9 +1511,7 @@
             legacyProgress: 'ebbinghaus_progress'
         };
 
-        const CLOUD_BACKEND = {
-            apiBase: location.protocol === 'file:' ? '' : `${location.origin}/api`
-        };
+        const SUPABASE_CONFIG = window.SUPABASE_CONFIG || {};
         const IS_PUBLIC_STATIC_HOST = /github\.io$/i.test(location.hostname);
 
         const groups = Array.from(
@@ -1676,7 +1676,7 @@
         let studyMode = 'new'; // 'new' = 新学, 'review' = 复盘
         let lastCompletedGroup = null; // 最后完成的组
         let cloudState = {
-            isConfigured: Boolean(CLOUD_BACKEND.apiBase),
+            isConfigured: Boolean(SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey),
             runtimeBlocked: location.protocol === 'file:',
             backendReady: false,
             isBusy: false,
@@ -1684,6 +1684,8 @@
             lastSyncAt: null,
             message: ''
         };
+        let supabaseClient = null;
+        let authSubscription = null;
 
         // Settings
         let settings = {
@@ -2358,34 +2360,63 @@
             });
         }
 
-        async function apiRequest(path, options = {}) {
-            const response = await fetch(`${CLOUD_BACKEND.apiBase}${path}`, {
-                method: options.method || 'GET',
-                headers: {
-                    'Content-Type': 'application/json',
-                    ...(options.headers || {})
-                },
-                credentials: 'same-origin',
-                body: options.body ? JSON.stringify(options.body) : undefined
+        function getSupabaseConfigMessage() {
+            return IS_PUBLIC_STATIC_HOST
+                ? '这个公开版已经支持真实账号和云端同步，但还没填入 Supabase 项目配置。把 `supabase-config.js` 里的 URL 和 anon key 填好后，注册和登录就会启用。'
+                : '还没配置 Supabase。请先创建项目，并把 `supabase-config.js` 里的 URL 和 anon key 填好。';
+        }
+
+        function ensureSupabaseClient() {
+            if (!cloudState.isConfigured) {
+                throw new Error(getSupabaseConfigMessage());
+            }
+
+            if (location.protocol === 'file:') {
+                throw new Error('当前页面是 file:// 直开模式。请改用本地 http 服务或已经上线的 https 网站，再使用账号同步。');
+            }
+
+            if (!window.supabase?.createClient) {
+                throw new Error('Supabase SDK 没有加载成功，请刷新页面后再试。');
+            }
+
+            if (!supabaseClient) {
+                supabaseClient = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.anonKey, {
+                    auth: {
+                        persistSession: true,
+                        autoRefreshToken: true,
+                        detectSessionInUrl: true
+                    }
+                });
+            }
+
+            return supabaseClient;
+        }
+
+        function formatSupabaseError(error, fallback = '云端请求失败，请稍后再试。') {
+            return error?.message || error?.error_description || fallback;
+        }
+
+        async function upsertProfileRow(client, user) {
+            if (!user?.id) return;
+
+            const { error } = await client.from('profiles').upsert({
+                id: user.id,
+                email: user.email || ''
+            }, {
+                onConflict: 'id'
             });
 
-            let payload = null;
-            try {
-                payload = await response.json();
-            } catch (error) {
-                payload = null;
+            if (error) {
+                throw new Error(formatSupabaseError(error, '资料初始化失败，请稍后再试。'));
             }
+        }
 
-            if (!response.ok) {
-                const fallbackMessage = response.status === 404
-                    ? (IS_PUBLIC_STATIC_HOST
-                        ? '这是公开静态版网站，当前部署没有附带账号后端，所以学习记录会保存在你自己的浏览器里。'
-                        : '当前页面只是静态资源，内置同步后端还没启动。请在项目目录运行 `node server.js` 后再打开。')
-                    : '云端请求失败，请稍后再试。';
-                throw new Error(payload?.error || fallbackMessage);
+        async function getCurrentSupabaseUser(client = ensureSupabaseClient()) {
+            const { data, error } = await client.auth.getSession();
+            if (error) {
+                throw new Error(formatSupabaseError(error, '读取登录状态失败，请刷新页面再试。'));
             }
-
-            return payload || {};
+            return data.session?.user || null;
         }
 
         function setCloudBusy(isBusy, message = '') {
@@ -2416,7 +2447,7 @@
             const isLoggedIn = Boolean(cloudState.user);
             const backendReady = Boolean(cloudState.backendReady);
 
-            configNote.style.display = isConfigured && !backendReady && !cloudState.runtimeBlocked ? 'block' : 'none';
+            configNote.style.display = !isConfigured ? 'block' : 'none';
             modeHint.style.display = location.protocol === 'file:' ? 'block' : 'none';
             registerBtn.style.display = isLoggedIn ? 'none' : 'inline-flex';
             loginBtn.style.display = isLoggedIn ? 'none' : 'inline-flex';
@@ -2430,13 +2461,13 @@
 
             if (!isConfigured) {
                 badge.textContent = '待配置';
-                statusText.textContent = '当前是 file:// 直开模式。本地记录仍然可用，但账号同步需要从内置服务器打开。';
+                statusText.textContent = getSupabaseConfigMessage();
                 return;
             }
 
             if (location.protocol === 'file:') {
                 badge.textContent = '直开受限';
-                statusText.textContent = '当前页面是 file:// 直开模式。要用账号登录和同步，请改用 `node server.js` 启动后的网址。';
+                statusText.textContent = '当前页面是 file:// 直开模式。要用账号登录和同步，请改用本地 http 服务或已经上线的 https 网站。';
                 return;
             }
 
@@ -2451,8 +2482,8 @@
                 badge.textContent = '待启动';
                 statusText.textContent = cloudState.message || (
                     IS_PUBLIC_STATIC_HOST
-                        ? '当前公开版已经能正常背词和保存本机记录，但没有附带账号同步后端。你在这台设备上的数据仍会保存在浏览器里。'
-                        : '内置同步服务还没连上。请在项目目录运行 `node server.js`，再从 http://127.0.0.1:4173 打开页面。'
+                        ? '云端项目正在连接中。如果刚填好 Supabase 配置，刷新一次页面就会启用账号同步。'
+                        : 'Supabase 项目还没连上。请检查 `supabase-config.js`，再从 http://127.0.0.1:4173 或外网地址打开页面。'
                 );
                 return;
             }
@@ -2517,11 +2548,24 @@
             if (!cloudState.backendReady || !cloudState.user) return false;
 
             try {
-                const result = await apiRequest('/sync/settings', {
-                    method: 'PUT',
-                    body: settings
+                const client = ensureSupabaseClient();
+                const payload = {
+                    user_id: cloudState.user.id,
+                    study_time: settings.studyTime,
+                    words_per_group: Number(settings.wordsPerGroup) || 50,
+                    minutes_per_group: Number(settings.minutesPerGroup) || 5,
+                    groups_per_day: Number(settings.groupsPerDay) || 6
+                };
+
+                const { error } = await client.from('user_settings').upsert(payload, {
+                    onConflict: 'user_id'
                 });
-                cloudState.lastSyncAt = result.lastSyncAt || new Date().toISOString();
+
+                if (error) {
+                    throw new Error(formatSupabaseError(error, '同步学习设置失败。'));
+                }
+
+                cloudState.lastSyncAt = new Date().toISOString();
                 cloudState.message = '';
                 renderCloudStatus();
                 return true;
@@ -2535,13 +2579,17 @@
             if (!cloudState.backendReady || !cloudState.user || !logs.length) return false;
 
             try {
-                const result = await apiRequest('/sync/sessions', {
-                    method: 'POST',
-                    body: {
-                        logs
-                    }
+                const client = ensureSupabaseClient();
+                const rows = createCloudRowsFromLogs(logs);
+                const { error } = await client.from('study_sessions').upsert(rows, {
+                    onConflict: 'user_id,session_key'
                 });
-                cloudState.lastSyncAt = result.lastSyncAt || new Date().toISOString();
+
+                if (error) {
+                    throw new Error(formatSupabaseError(error, '同步学习记录失败。'));
+                }
+
+                cloudState.lastSyncAt = new Date().toISOString();
                 cloudState.message = '';
                 renderCloudStatus();
                 return true;
@@ -2557,18 +2605,33 @@
             setCloudBusy(true, '正在拉取云端记录...');
 
             try {
-                const payload = await apiRequest('/sync');
-                const remoteLogs = Array.isArray(payload.sessions) ? payload.sessions : [];
+                const client = ensureSupabaseClient();
+                await upsertProfileRow(client, cloudState.user);
+
+                const [{ data: remoteSettings, error: settingsError }, { data: remoteSessions, error: sessionsError }] = await Promise.all([
+                    client.from('user_settings').select('*').eq('user_id', cloudState.user.id).maybeSingle(),
+                    client.from('study_sessions').select('*').eq('user_id', cloudState.user.id).order('created_at', { ascending: true })
+                ]);
+
+                if (settingsError) {
+                    throw new Error(formatSupabaseError(settingsError, '读取云端学习设置失败。'));
+                }
+
+                if (sessionsError) {
+                    throw new Error(formatSupabaseError(sessionsError, '读取云端学习记录失败。'));
+                }
+
+                const remoteLogs = Array.isArray(remoteSessions) ? remoteSessions.map(mapCloudSession) : [];
                 const mergedLogs = mergeProgressLogs(readProgressLogs(), remoteLogs);
 
                 writeProgressLogs(mergedLogs);
                 updateStats();
-                applyCloudSettings(payload.settings);
+                applyCloudSettings(remoteSettings);
 
                 await syncSettingsToCloud();
                 await syncProgressLogsToCloud(mergedLogs);
 
-                cloudState.lastSyncAt = payload.lastSyncAt || new Date().toISOString();
+                cloudState.lastSyncAt = new Date().toISOString();
                 cloudState.message = '';
             } catch (error) {
                 handleCloudError(error, '初始化云端失败');
@@ -2580,7 +2643,7 @@
         async function initializeCloudSync() {
             renderCloudStatus();
 
-            if (!CLOUD_BACKEND.apiBase) {
+            if (!cloudState.isConfigured) {
                 return;
             }
 
@@ -2589,12 +2652,35 @@
             }
 
             try {
-                setCloudBusy(true, '正在检查内置同步服务...');
-                const payload = await apiRequest('/auth/session');
+                setCloudBusy(true, '正在连接 Supabase...');
+                const client = ensureSupabaseClient();
                 cloudState.backendReady = true;
-                cloudState.user = payload.user || null;
-                cloudState.lastSyncAt = payload.lastSyncAt || null;
+                cloudState.user = await getCurrentSupabaseUser(client);
+                cloudState.lastSyncAt = null;
                 cloudState.message = '';
+
+                if (!authSubscription) {
+                    const subscriptionRef = client.auth.onAuthStateChange((event, session) => {
+                        cloudState.user = session?.user || null;
+                        if (!cloudState.user) {
+                            cloudState.lastSyncAt = null;
+                            cloudState.message = '';
+                            renderCloudStatus();
+                            return;
+                        }
+
+                        if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
+                            setTimeout(() => {
+                                hydrateCloudData();
+                            }, 0);
+                        }
+
+                        renderCloudStatus();
+                    });
+
+                    authSubscription = subscriptionRef.data.subscription;
+                }
+
                 renderCloudStatus();
 
                 if (cloudState.user) {
@@ -2610,8 +2696,8 @@
         }
 
         async function registerAccount() {
-            if (!cloudState.backendReady) {
-                showModal('还没准备好', '请先用 `node server.js` 启动这个项目，再尝试注册。');
+            if (!cloudState.isConfigured) {
+                showModal('还没准备好', getSupabaseConfigMessage());
                 return;
             }
 
@@ -2629,17 +2715,35 @@
             setCloudBusy(true, '正在创建账号...');
 
             try {
-                const payload = await apiRequest('/auth/register', {
-                    method: 'POST',
-                    body: {
-                        email,
-                        password
+                const client = ensureSupabaseClient();
+                const { data, error } = await client.auth.signUp({
+                    email,
+                    password,
+                    options: {
+                        emailRedirectTo: location.href
                     }
                 });
-                cloudState.user = payload.user;
+
+                if (error) {
+                    throw new Error(formatSupabaseError(error, '注册失败，请稍后再试。'));
+                }
+
                 cloudState.backendReady = true;
-                await hydrateCloudData();
-                showModal('欢迎回来', '账号已经注册并登录成功，本地记录也会开始同步。');
+
+                if (data.user) {
+                    await upsertProfileRow(client, data.user);
+                }
+
+                if (data.session?.user) {
+                    cloudState.user = data.session.user;
+                    await hydrateCloudData();
+                    showModal('欢迎回来', '账号已经注册并登录成功，本地记录也会开始同步。');
+                } else {
+                    cloudState.user = null;
+                    cloudState.message = '账号已经创建。请去邮箱点开确认链接，然后再回来登录同步。';
+                    renderCloudStatus();
+                    showModal('去邮箱确认', '账号已经创建。请去邮箱点开确认链接，然后回来登录同步。');
+                }
             } catch (error) {
                 handleCloudError(error, '注册失败');
             } finally {
@@ -2648,8 +2752,8 @@
         }
 
         async function loginAccount() {
-            if (!cloudState.backendReady) {
-                showModal('还没准备好', '请先用 `node server.js` 启动这个项目，再尝试登录。');
+            if (!cloudState.isConfigured) {
+                showModal('还没准备好', getSupabaseConfigMessage());
                 return;
             }
 
@@ -2662,14 +2766,17 @@
             setCloudBusy(true, '正在登录并同步...');
 
             try {
-                const payload = await apiRequest('/auth/login', {
-                    method: 'POST',
-                    body: {
-                        email,
-                        password
-                    }
+                const client = ensureSupabaseClient();
+                const { data, error } = await client.auth.signInWithPassword({
+                    email,
+                    password
                 });
-                cloudState.user = payload.user;
+
+                if (error) {
+                    throw new Error(formatSupabaseError(error, '登录失败，请稍后再试。'));
+                }
+
+                cloudState.user = data.user || null;
                 cloudState.backendReady = true;
                 await hydrateCloudData();
                 showModal('登录成功', '你的本地记录已经和云端账号开始同步。');
@@ -2686,9 +2793,11 @@
             setCloudBusy(true, '正在退出登录...');
 
             try {
-                await apiRequest('/auth/logout', {
-                    method: 'POST'
-                });
+                const client = ensureSupabaseClient();
+                const { error } = await client.auth.signOut();
+                if (error) {
+                    throw new Error(formatSupabaseError(error, '退出失败，请稍后再试。'));
+                }
                 cloudState.user = null;
                 cloudState.lastSyncAt = null;
                 cloudState.message = '';
