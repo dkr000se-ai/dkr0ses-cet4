@@ -1669,6 +1669,7 @@
             isActive: false,
             isPaused: false,
             timer: null,
+            timerEndsAt: null,
             timeLeft: 300,
             words: [],
             results: []
@@ -1743,18 +1744,197 @@
             return shuffled;
         }
 
+        function normalizeWordForFamily(value) {
+            return String(value || '')
+                .toLowerCase()
+                .replace(/[^a-z]/g, '');
+        }
+
+        function addFamilyCandidate(candidates, value) {
+            if (value.length >= 3) {
+                candidates.add(value);
+            }
+        }
+
+        function buildFamilyCandidates(word) {
+            const normalized = normalizeWordForFamily(word);
+            const candidates = new Set();
+
+            if (!normalized) {
+                return candidates;
+            }
+
+            const suffixRules = [
+                ['ization', ['ize']],
+                ['ational', ['ate']],
+                ['fulness', ['ful']],
+                ['ousness', ['ous']],
+                ['iveness', ['ive']],
+                ['ability', ['able']],
+                ['ibility', ['ible']],
+                ['ation', ['ate', 'at']],
+                ['ition', ['ite', 'it']],
+                ['ment', ['']],
+                ['ness', ['']],
+                ['less', ['']],
+                ['able', ['']],
+                ['ible', ['']],
+                ['ally', ['al', '']],
+                ['tion', ['t']],
+                ['sion', ['d', 'de', 's']],
+                ['ance', ['']],
+                ['ence', ['']],
+                ['ship', ['']],
+                ['hood', ['']],
+                ['ward', ['']],
+                ['wise', ['']],
+                ['ical', ['ic', '']],
+                ['ious', ['y', 'i', '', 'e']],
+                ['eous', ['e']],
+                ['ing', ['', 'e']],
+                ['ied', ['y', 'i']],
+                ['ies', ['y', 'i']],
+                ['ed', ['', 'e']],
+                ['es', ['']],
+                ['er', ['']],
+                ['or', ['']],
+                ['ly', ['']],
+                ['al', ['']],
+                ['ic', ['']],
+                ['ry', ['']],
+                ['ty', ['t', '']],
+                ['ity', ['e', '']],
+                ['ive', ['', 'e']],
+                ['ous', ['']],
+                ['ant', ['', 'e']],
+                ['ent', ['', 'e']],
+                ['ism', ['']],
+                ['ist', ['']],
+                ['ary', ['', 'e']],
+                ['ate', ['']],
+                ['ize', ['']],
+                ['ise', ['']],
+                ['s', ['']]
+            ];
+            const prefixes = ['re', 'un', 'in', 'im', 'dis', 'pre', 'pro', 'sub', 'trans', 'inter', 'over'];
+            const queue = [normalized];
+
+            addFamilyCandidate(candidates, normalized);
+
+            while (queue.length) {
+                const current = queue.shift();
+                addFamilyCandidate(candidates, current);
+
+                if (current.length >= 4) {
+                    prefixes.forEach(prefix => {
+                        if (current.startsWith(prefix) && current.length - prefix.length >= 3) {
+                            const trimmedPrefix = current.slice(prefix.length);
+                            if (!candidates.has(trimmedPrefix)) {
+                                queue.push(trimmedPrefix);
+                            }
+                        }
+                    });
+                }
+
+                suffixRules.forEach(([suffix, replacements]) => {
+                    if (!current.endsWith(suffix)) return;
+
+                    const base = current.slice(0, -suffix.length);
+                    replacements.forEach(replacement => {
+                        const next = `${base}${replacement}`;
+                        if (next.length < 3 || candidates.has(next)) return;
+                        queue.push(next);
+                    });
+                });
+
+                if (/(bb|dd|ff|gg|ll|mm|nn|pp|rr|tt)$/.test(current)) {
+                    const deduped = current.slice(0, -1);
+                    if (!candidates.has(deduped)) {
+                        queue.push(deduped);
+                    }
+                }
+            }
+
+            for (let length = Math.min(normalized.length, 7); length >= 3; length--) {
+                addFamilyCandidate(candidates, normalized.slice(0, length));
+            }
+
+            return candidates;
+        }
+
+        function buildFamilyOrderedWords(words) {
+            const familyFrequency = new Map();
+            const wordCandidates = new Map();
+
+            words.forEach(word => {
+                const normalized = normalizeWordForFamily(word.word);
+                const candidates = buildFamilyCandidates(word.word);
+                wordCandidates.set(word, { normalized, candidates });
+
+                candidates.forEach(candidate => {
+                    familyFrequency.set(candidate, (familyFrequency.get(candidate) || 0) + 1);
+                });
+            });
+
+            const familyBuckets = new Map();
+
+            words.forEach(word => {
+                const { normalized, candidates } = wordCandidates.get(word);
+                let bestKey = normalized || `misc-${word.num}`;
+                let bestScore = -1;
+
+                candidates.forEach(candidate => {
+                    const frequency = familyFrequency.get(candidate) || 0;
+                    if (frequency < 2) return;
+
+                    const score = frequency * 100 + candidate.length * 10 - Math.max(0, normalized.length - candidate.length);
+                    if (score > bestScore || (score === bestScore && candidate.length > bestKey.length)) {
+                        bestScore = score;
+                        bestKey = candidate;
+                    }
+                });
+
+                if (!familyBuckets.has(bestKey)) {
+                    familyBuckets.set(bestKey, []);
+                }
+
+                familyBuckets.get(bestKey).push(word);
+            });
+
+            const orderedFamilies = [...familyBuckets.entries()].sort((left, right) => {
+                const sizeGap = right[1].length - left[1].length;
+                if (sizeGap !== 0) return sizeGap;
+                return seedFromString(left[0]) - seedFromString(right[0]);
+            });
+
+            return orderedFamilies.flatMap(([familyKey, familyWords]) => {
+                return familyWords.sort((left, right) => {
+                    const leftWord = normalizeWordForFamily(left.word);
+                    const rightWord = normalizeWordForFamily(right.word);
+                    const leftDistance = Math.abs(leftWord.length - familyKey.length);
+                    const rightDistance = Math.abs(rightWord.length - familyKey.length);
+
+                    if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+                    if (leftWord.length !== rightWord.length) return leftWord.length - rightWord.length;
+                    return parseInt(left.num, 10) - parseInt(right.num, 10);
+                });
+            });
+        }
+
         function prepareShuffledGroupWords() {
             shuffledWordsByGroup = new Map();
+            const orderedWords = buildFamilyOrderedWords(fullVocab);
 
             for (let day = 1; day <= PLAN_CONFIG.learningDays; day++) {
                 const dayGroups = groups.filter(group => group.day === day);
-                const dayWords = dayGroups.flatMap(group => getWordsForRange(group.start, group.end));
-                const shuffledDayWords = deterministicShuffle(dayWords, `day-${day}-r0se`);
+                const dayStartIndex = (day - 1) * PLAN_CONFIG.wordsPerBaseGroup * PLAN_CONFIG.groupsPerLearningDay;
+                const dayWordCount = dayGroups.length * PLAN_CONFIG.wordsPerBaseGroup;
+                const dayWords = orderedWords.slice(dayStartIndex, dayStartIndex + dayWordCount);
 
                 dayGroups.forEach((group, index) => {
                     const startIndex = index * PLAN_CONFIG.wordsPerBaseGroup;
                     const endIndex = startIndex + PLAN_CONFIG.wordsPerBaseGroup;
-                    shuffledWordsByGroup.set(group.group, shuffledDayWords.slice(startIndex, endIndex));
+                    shuffledWordsByGroup.set(group.group, dayWords.slice(startIndex, endIndex));
                 });
             }
         }
@@ -1993,11 +2173,13 @@
                 return;
             }
 
+            clearStudyTimer();
             studySession.isActive = true;
             studySession.isPaused = false;
             studySession.timeLeft = settings.minutesPerGroup * 60;
             studySession.groupWords = [];
             studySession.currentWordInGroup = 0;
+            studySession.results = [];
             
             // Get words for current group from today's new groups
             const group = newGroups[currentGroup];
@@ -2029,11 +2211,13 @@
                 return;
             }
             
+            clearStudyTimer();
             studySession.isActive = true;
             studySession.isPaused = false;
             studySession.timeLeft = settings.minutesPerGroup * 60;
             studySession.groupWords = [];
             studySession.currentWordInGroup = 0;
+            studySession.results = [];
             
             // Get words for review group from today's groups
             const allWords = getWordsForGroup(group);
@@ -2067,16 +2251,42 @@
             return shuffledWordsByGroup.get(group.group) || getWordsForRange(group.start, group.end);
         }
 
-        function startTimer() {
+        function clearStudyTimer() {
+            if (studySession.timer) {
+                clearInterval(studySession.timer);
+            }
+            studySession.timer = null;
+            studySession.timerEndsAt = null;
+        }
+
+        function getRemainingTimeLeft() {
+            if (!studySession.timerEndsAt) {
+                return Math.max(0, studySession.timeLeft || 0);
+            }
+
+            return Math.max(0, Math.ceil((studySession.timerEndsAt - Date.now()) / 1000));
+        }
+
+        function startTimer(durationSeconds = studySession.timeLeft) {
+            const safeDuration = Math.max(0, Number(durationSeconds) || 0);
+            clearStudyTimer();
+            studySession.isPaused = false;
+            studySession.timeLeft = safeDuration;
+            studySession.timerEndsAt = Date.now() + safeDuration * 1000;
+            updateTimerDisplay();
+
             studySession.timer = setInterval(() => {
-                if (!studySession.isPaused) {
-                    studySession.timeLeft--;
+                const remaining = getRemainingTimeLeft();
+                if (remaining !== studySession.timeLeft) {
+                    studySession.timeLeft = remaining;
                     updateTimerDisplay();
-                    if (studySession.timeLeft <= 0) {
-                        endGroup();
-                    }
                 }
-            }, 1000);
+
+                if (remaining <= 0) {
+                    clearStudyTimer();
+                    endGroup();
+                }
+            }, 250);
         }
 
         function updateTimerDisplay() {
@@ -2124,13 +2334,23 @@
         }
 
         function pauseStudy() {
-            studySession.isPaused = !studySession.isPaused;
-            document.getElementById('pauseBtn').textContent = 
-                studySession.isPaused ? '继续' : '暂停';
+            if (!studySession.isActive) return;
+
+            if (studySession.isPaused) {
+                document.getElementById('pauseBtn').textContent = '暂停';
+                startTimer(studySession.timeLeft);
+                return;
+            }
+
+            studySession.timeLeft = getRemainingTimeLeft();
+            studySession.isPaused = true;
+            clearStudyTimer();
+            updateTimerDisplay();
+            document.getElementById('pauseBtn').textContent = '继续';
         }
 
         function endGroup() {
-            clearInterval(studySession.timer);
+            clearStudyTimer();
             saveProgress();
             
             const known = studySession.results.filter(r => r.status === 'known').length;
@@ -2186,7 +2406,7 @@
         }
 
         function exitStudy() {
-            clearInterval(studySession.timer);
+            clearStudyTimer();
             resetStudyUI();
         }
 
@@ -2195,7 +2415,11 @@
             const totalGroupsToday = newGroups.length || settings.groupsPerDay;
             const isReviewOnlyDay = newGroups.length === 0 && reviewGroups.length > 0;
             const readyWordCount = Math.min(settings.wordsPerGroup, PLAN_CONFIG.wordsPerBaseGroup);
+            clearStudyTimer();
             studySession.isActive = false;
+            studySession.isPaused = false;
+            studySession.timeLeft = settings.minutesPerGroup * 60;
+            studySession.words = [];
             studySession.results = [];
             document.getElementById('timer').textContent = 
                 `${settings.minutesPerGroup.toString().padStart(2, '0')}:00`;
@@ -2225,6 +2449,7 @@
             
             document.getElementById('startBtn').style.display = 'flex';
             document.getElementById('pauseBtn').style.display = 'none';
+            document.getElementById('pauseBtn').textContent = '暂停';
             document.getElementById('knownBtn').style.display = 'none';
             document.getElementById('unknownBtn').style.display = 'none';
             document.getElementById('exitBtn').style.display = 'none';
@@ -2729,10 +2954,6 @@
                 }
 
                 cloudState.backendReady = true;
-
-                if (data.user) {
-                    await upsertProfileRow(client, data.user);
-                }
 
                 if (data.session?.user) {
                     cloudState.user = data.session.user;
