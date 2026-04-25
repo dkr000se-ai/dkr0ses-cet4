@@ -287,6 +287,12 @@
             box-shadow: 0 16px 28px rgba(255, 107, 107, 0.26);
         }
 
+        .btn-support {
+            color: white;
+            background: linear-gradient(135deg, #07c160 0%, #22c7a9 55%, #8fd66c 100%);
+            box-shadow: 0 16px 28px rgba(7, 193, 96, 0.22);
+        }
+
         .btn-secondary {
             color: var(--ink);
             background: rgba(255, 255, 255, 0.78);
@@ -1011,6 +1017,29 @@
             box-shadow: 0 24px 42px rgba(15, 8, 33, 0.24);
         }
 
+        .support-qr-wrap {
+            display: none;
+            margin: 8px auto 20px;
+            padding: 12px;
+            border-radius: 24px;
+            background:
+                linear-gradient(135deg, rgba(7, 193, 96, 0.14), rgba(255, 255, 255, 0.82)),
+                rgba(255, 255, 255, 0.88);
+            border: 1px solid rgba(7, 193, 96, 0.16);
+        }
+
+        .support-qr-wrap.active {
+            display: block;
+        }
+
+        .support-qr {
+            display: block;
+            width: min(100%, 300px);
+            margin: 0 auto;
+            border-radius: 18px;
+            box-shadow: 0 16px 28px rgba(15, 8, 33, 0.12);
+        }
+
         .magic-cursor,
         .magic-cursor-ring,
         .trail-spark {
@@ -1218,6 +1247,7 @@
                 <div class="hero-actions">
                     <button class="btn-primary" data-jump-section="study">直接进入背诵舱</button>
                     <button class="btn-secondary" data-jump-section="plan">先看 17 天地图</button>
+                    <button class="btn-secondary btn-support" onclick="showSupportModal()">求支持</button>
                 </div>
                 <div class="hero-notes">
                     <span class="note-pill">好玩背景</span>
@@ -1489,6 +1519,9 @@
         <div class="modal-content">
             <h3 class="modal-title" id="modalTitle">提醒</h3>
             <p class="modal-text" id="modalText">内容</p>
+            <div class="support-qr-wrap" id="supportQrWrap">
+                <img class="support-qr" src="./support-qr.jpg" alt="微信收款码">
+            </div>
             <button class="btn-primary" onclick="closeModal()">知道了</button>
         </div>
     </div>
@@ -3044,14 +3077,24 @@
         let modalAutoStart = false;
         
         function showModal(title, text, autoStart = false) {
+            document.getElementById('supportQrWrap').classList.remove('active');
             document.getElementById('modalTitle').textContent = title;
             document.getElementById('modalText').textContent = text;
             document.getElementById('modal').classList.add('active');
             modalAutoStart = autoStart;
         }
 
+        function showSupportModal() {
+            modalAutoStart = false;
+            document.getElementById('modalTitle').textContent = '求支持';
+            document.getElementById('modalText').textContent = '如果这个背词小站帮到你，可以用微信扫一扫支持一下。';
+            document.getElementById('supportQrWrap').classList.add('active');
+            document.getElementById('modal').classList.add('active');
+        }
+
         function closeModal() {
             document.getElementById('modal').classList.remove('active');
+            document.getElementById('supportQrWrap').classList.remove('active');
             // 如果是组完成弹窗，自动开始下一组
             if (modalAutoStart) {
                 modalAutoStart = false;
@@ -3064,6 +3107,18 @@
                 }, 500);
             }
         }
+
+        document.getElementById('modal').addEventListener('click', event => {
+            if (event.target === event.currentTarget) {
+                closeModal();
+            }
+        });
+
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && document.getElementById('modal').classList.contains('active')) {
+                closeModal();
+            }
+        });
 
         // Initialize
         loadVocab();
